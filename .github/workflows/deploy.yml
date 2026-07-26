@@ -1,0 +1,90 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || secrets.AWS_REGION || 'us-east-1' }}
+  ECR_REPO: mvp-ecs-qwen
+  STACK_NAME: ecs-inference-mvp
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Check required secrets
+        env:
+          API_KEY: ${{ secrets.INFERENCE_API_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          missing=0
+          if [ -z "$AWS_ACCESS_KEY_ID" ]; then
+            echo "::error::Missing repository secret AWS_ACCESS_KEY_ID"
+            missing=1
+          fi
+          if [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
+            echo "::error::Missing repository secret AWS_SECRET_ACCESS_KEY"
+            missing=1
+          fi
+          if [ -z "$API_KEY" ]; then
+            echo "::error::Missing repository secret INFERENCE_API_KEY"
+            missing=1
+          fi
+          exit "$missing"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          IMAGE_URI="${{ steps.ecr.outputs.registry }}/${ECR_REPO}:${IMAGE_TAG}"
+          aws ecr describe-repositories --repository-names "${ECR_REPO}" >/dev/null 2>&1 \
+            || aws ecr create-repository --repository-name "${ECR_REPO}" >/dev/null
+          docker build -t "${IMAGE_URI}" .
+          docker push "${IMAGE_URI}"
+          echo "IMAGE_URI=${IMAGE_URI}" >> "$GITHUB_ENV"
+
+      - name: Deploy CloudFormation stack
+        env:
+          API_KEY: ${{ secrets.INFERENCE_API_KEY }}
+        run: |
+          aws cloudformation deploy \
+            --stack-name "${STACK_NAME}" \
+            --template-file infra/ecs-stack.yaml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              "ApiKey=${API_KEY}" \
+              "ImageUri=${IMAGE_URI}" \
+              "ModelS3Uri=s3://bedrock-models-646821141010/qwen/Qwen2.5-7B-Instruct/" \
+              "DesiredCount=1" \
+            --no-fail-on-empty-changeset
+
+      - name: Print service URL
+        run: |
+          aws cloudformation describe-stacks \
+            --stack-name "${STACK_NAME}" \
+            --query "Stacks[0].Outputs[?OutputKey=='ServiceUrl'].OutputValue" \
+            --output text

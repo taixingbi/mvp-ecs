@@ -1,0 +1,13 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.env
+.venv/
+venv/
+*.egg-info/
+.idea/
+.vscode/
+.aws-sam/
+dist/
+build/
+.inference_api_key
