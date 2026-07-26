@@ -33,8 +33,8 @@ Parameters:
     Description: EBS root volume GB (must fit OS + synced model weights)
   EcsGpuAmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: /aws/service/ecs/optimized-ami/amazon-linux-2/gpu/recommended
-    Description: ECS GPU-optimized AMI (SSM extracts image_id from JSON)
+    Default: /aws/service/ecs/optimized-ami/amazon-linux-2/gpu/recommended/image_id
+    Description: ECS GPU-optimized AMI ID (nested SSM image_id key)
 
 Conditions:
   HasTasks: !Not [!Equals [!Ref DesiredCount, 0]]
