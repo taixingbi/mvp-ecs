@@ -252,7 +252,8 @@ Resources:
             Interval: 30
             Timeout: 10
             Retries: 10
-            StartPeriod: 900
+            # ECS max startPeriod is 300s; ALB HealthCheckGracePeriodSeconds covers longer cold start
+            StartPeriod: 300
 
   LaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
