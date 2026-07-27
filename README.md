@@ -53,7 +53,7 @@ export SERVICE_URL=$(aws cloudformation describe-stacks \
   --output text)
 export INFERENCE_API_KEY='your-shared-secret'
 
-curl -sS -X POST "${SERVICE_URL}/v1/chat/completions" \
+curl -sS -N -X POST "${SERVICE_URL}/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${INFERENCE_API_KEY}" \
   -d '{
@@ -61,7 +61,8 @@ curl -sS -X POST "${SERVICE_URL}/v1/chat/completions" \
     "messages": [{"role": "user", "content": "Hello"}],
     "max_tokens": 64,
     "temperature": 0,
-    "top_p": 1.0
+    "top_p": 1.0,
+    "stream": true
   }'
 ```
 
@@ -82,7 +83,8 @@ Cold start includes S3 sync + model load; allow several minutes before `/health`
   ],
   "max_tokens": 512,
   "temperature": 0,
-  "top_p": 1.0
+  "top_p": 1.0,
+  "stream": true
 }
 ```
 
@@ -91,7 +93,7 @@ Headers (either works):
 - `Authorization: Bearer <INFERENCE_API_KEY>`
 - `x-api-key: <INFERENCE_API_KEY>`
 
-Success: OpenAI `chat.completion` shape (`choices`, `usage.prompt_tokens`, etc.). The adapter proxies vLLM; request `model` is echoed when provided.
+Success: OpenAI `chat.completion` shape, or SSE `chat.completion.chunk` events when `"stream": true`. The adapter proxies vLLM; request `model` is echoed when provided.
 
 ### Legacy
 

@@ -1,9 +1,10 @@
 import os
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 API_KEY = os.environ.get("API_KEY", "")
 MODEL_ID = os.environ.get("MODEL_ID", "Qwen2.5-7B-Instruct")
@@ -86,26 +87,67 @@ def _normalize_messages(payload: dict[str, Any]) -> list[dict[str, str]]:
     return normalized
 
 
+def _vllm_body(
+    messages: list[dict[str, str]],
+    max_tokens: int,
+    temperature: float | None,
+    top_p: float | None,
+    *,
+    stream: bool,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "model": MODEL_ID,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "stream": stream,
+    }
+    if temperature is not None:
+        body["temperature"] = temperature
+    if top_p is not None:
+        body["top_p"] = top_p
+    return body
+
+
+def _echo_model(data: dict[str, Any], request_model: Any) -> dict[str, Any]:
+    if isinstance(request_model, str) and request_model:
+        data["model"] = request_model
+    return data
+
+
 async def _vllm_chat_completion(
     messages: list[dict[str, str]],
     max_tokens: int,
     temperature: float | None,
     top_p: float | None,
 ) -> dict[str, Any]:
-    body: dict[str, Any] = {
-        "model": MODEL_ID,
-        "messages": messages,
-        "max_tokens": max_tokens,
-    }
-    if temperature is not None:
-        body["temperature"] = temperature
-    if top_p is not None:
-        body["top_p"] = top_p
-
     async with httpx.AsyncClient(timeout=300.0) as client:
-        resp = await client.post(f"{VLLM_BASE_URL}/v1/chat/completions", json=body)
+        resp = await client.post(
+            f"{VLLM_BASE_URL}/v1/chat/completions",
+            json=_vllm_body(messages, max_tokens, temperature, top_p, stream=False),
+        )
         resp.raise_for_status()
         return resp.json()
+
+
+async def _vllm_chat_completion_stream(
+    messages: list[dict[str, str]],
+    max_tokens: int,
+    temperature: float | None,
+    top_p: float | None,
+) -> AsyncIterator[bytes]:
+    timeout = httpx.Timeout(300.0, connect=30.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream(
+            "POST",
+            f"{VLLM_BASE_URL}/v1/chat/completions",
+            json=_vllm_body(messages, max_tokens, temperature, top_p, stream=True),
+        ) as resp:
+            if resp.status_code >= 400:
+                detail = (await resp.aread()).decode(errors="replace")[:500]
+                raise RuntimeError(detail)
+            async for chunk in resp.aiter_bytes():
+                if chunk:
+                    yield chunk
 
 
 @app.get("/health")
@@ -128,7 +170,7 @@ async def options() -> Response:
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(request: Request) -> JSONResponse:
+async def chat_completions(request: Request) -> Response:
     if not _authorized(request):
         return _json(401, {"error": "unauthorized"})
 
@@ -143,6 +185,34 @@ async def chat_completions(request: Request) -> JSONResponse:
     except ValueError as exc:
         return _json(400, {"error": str(exc)})
 
+    request_model = payload.get("model")
+    stream = bool(payload.get("stream"))
+
+    if stream:
+        try:
+            generator = _vllm_chat_completion_stream(
+                messages, max_tokens, temperature, top_p
+            )
+            first = await anext(generator)
+        except httpx.HTTPStatusError as exc:
+            return _json(502, {"error": "vllm request failed", "detail": exc.response.text[:500]})
+        except Exception as exc:  # noqa: BLE001
+            return _json(502, {"error": "vllm request failed", "detail": str(exc)})
+
+        async def event_stream() -> AsyncIterator[bytes]:
+            yield first
+            async for chunk in generator:
+                yield chunk
+
+        headers = {
+            **CORS_HEADERS,
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        }
+        return StreamingResponse(
+            event_stream(), media_type="text/event-stream", headers=headers
+        )
+
     try:
         data = await _vllm_chat_completion(messages, max_tokens, temperature, top_p)
     except httpx.HTTPStatusError as exc:
@@ -150,12 +220,7 @@ async def chat_completions(request: Request) -> JSONResponse:
     except Exception as exc:  # noqa: BLE001
         return _json(502, {"error": "vllm request failed", "detail": str(exc)})
 
-    # Echo request model if provided; otherwise keep vLLM's served name.
-    request_model = payload.get("model")
-    if isinstance(request_model, str) and request_model:
-        data["model"] = request_model
-
-    return _json(200, data)
+    return _json(200, _echo_model(data, request_model))
 
 
 @app.post("/")

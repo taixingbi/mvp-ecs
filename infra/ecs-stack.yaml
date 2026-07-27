@@ -313,6 +313,9 @@ Resources:
         - !Ref PublicSubnetB
       SecurityGroups:
         - !Ref AlbSecurityGroup
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "300"
 
   TargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
